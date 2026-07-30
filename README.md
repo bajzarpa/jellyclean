@@ -45,7 +45,7 @@ required for installing.
 ## Usage
 
 ```bash
-# Interactive mode — prompts guide you through every step
+# Interactive mode — arrow-key driven menu guides you through every step
 jellyfin-clean-orphans
 
 # Read-only: show how many items per type are missing an image record
