@@ -1,5 +1,5 @@
-#!/usr/bin/env bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 
 # Remote installer for jellyfin-clean-orphans.
 # Downloads the script directly from GitHub (raw) and installs it globally.
