@@ -73,6 +73,27 @@ jellyfin-clean-orphans --restore
 jellyfin-clean-orphans --db /path/to/jellyfin.db --all --dry-run
 ```
 
+### Interactive mode
+
+Running without flags opens an interactive menu with keyboard-driven UI:
+
+| Key | Action |
+|---|---|
+| `↑` / `↓` | Navigate menu items |
+| `↵` Enter | Confirm selection |
+| `y` / `n` | Answer confirm prompts (instant, no enter needed) |
+| `Space` | Toggle checkbox items (multi-select) |
+| `Backspace` | Edit text input |
+| `Ctrl+C` | Exit at any prompt |
+
+The interactive menu offers:
+- **Image gap report** — optionally filtered by type (e.g. `Movie`, `Episode`)
+- **Scan for orphans (dry-run)** — filter by path substring or scan all
+- **Scan and clean orphans** — same choices, asks confirmation, backs up, then cleans
+- **Restore database from backup** — lists all `.jellycleanbak` backups with timestamps and sizes
+
+All UI is built with Python stdlib (`termios`, `tty`, ANSI escape codes) — no pip packages required.
+
 ### Flags
 
 | Flag | Description |
