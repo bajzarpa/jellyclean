@@ -45,6 +45,9 @@ required for installing.
 ## Usage
 
 ```bash
+# Interactive mode — prompts guide you through every step
+jellyfin-clean-orphans
+
 # Read-only: show how many items per type are missing an image record
 jellyfin-clean-orphans --image-gap-report
 
@@ -63,6 +66,9 @@ jellyfin-clean-orphans --filter "Dutton Ranch" --execute
 # Full library cleanup + restart Jellyfin afterward, reporting service status
 jellyfin-clean-orphans --all --execute --restart-jellyfin
 
+# Restore the DB from the most recent jellycleanbak backup
+jellyfin-clean-orphans --restore
+
 # Point at a non-default DB location
 jellyfin-clean-orphans --db /path/to/jellyfin.db --all --dry-run
 ```
@@ -75,17 +81,18 @@ jellyfin-clean-orphans --db /path/to/jellyfin.db --all --dry-run
 | `--filter TEXT` | Substring match on `Path` (or `Type`, when combined with `--image-gap-report`) |
 | `--all` | Scan the entire library for orphans, ignoring `--filter` |
 | `--dry-run` | Default. Show what would be deleted without changing anything |
-| `--execute` | Actually perform deletions (auto-backs up the DB first) |
+| `--execute` | Actually perform deletions (backs up the DB first) |
 | `--restart-jellyfin` | After a successful `--execute`, restart the `jellyfin` systemd service and print its status |
 | `--image-gap-report` | Read-only. Report BaseItems counts vs. how many have an image record, grouped by type |
+| `--restore` | Restore DB from the most recent `.jellycleanbak` backup |
 
 ## How it works
 
 - Discovers child tables with foreign keys pointing at `BaseItems.Id` via
   `PRAGMA foreign_key_list`, so it doesn't rely on hardcoded schema
   assumptions that can break across Jellyfin versions.
-- Backs up the DB (timestamped `.bak` file next to the original) before any
-  `--execute` run.
+- Backs up the DB (timestamped `.jellycleanbak` file next to the original) before any
+  `--execute` run. Backups are discoverable for later restore.
 - Batches deletes in chunks of 500 to stay under SQLite's variable limit on
   large orphan sets.
 

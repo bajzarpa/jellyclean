@@ -1,19 +1,4 @@
 #!/usr/bin/env python3
-"""
-Removes orphaned Jellyfin BaseItems rows (and related child rows) for items
-whose Path no longer exists on disk, filtered by a path substring.
-
-Works with the newer EF-Core-based Jellyfin schema (BaseItems table, Id primary key).
-Automatically discovers which tables have foreign keys pointing at BaseItems.Id,
-so it doesn't need hardcoded child-table names.
-
-Usage:
-  ./clean_orphaned_baseitems.py --filter "Dutton Ranch" --dry-run
-  ./clean_orphaned_baseitems.py --filter "Dutton Ranch" --execute
-  ./clean_orphaned_baseitems.py --all --dry-run
-  ./clean_orphaned_baseitems.py --image-gap-report
-  ./clean_orphaned_baseitems.py --db /path/to/jellyfin.db --all --execute --restart-jellyfin
-"""
 
 import sqlite3
 import sys
@@ -22,10 +7,15 @@ import shutil
 import os
 import subprocess
 import time
+import glob
 from datetime import datetime
 
+DEFAULT_DB_PATH = "/var/lib/jellyfin/data/jellyfin.db"
+BACKUP_SUFFIX = ".jellycleanbak"
+CHUNK = 500
+
+
 def find_child_fk_tables(cur):
-    """Return list of (table, column) where column is a FK referencing BaseItems.Id"""
     cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
     tables = [r[0] for r in cur.fetchall()]
     refs = []
@@ -37,11 +27,11 @@ def find_child_fk_tables(cur):
         except sqlite3.OperationalError:
             continue
         for row in cur.fetchall():
-            # row: id, seq, table, from, to, on_update, on_delete, match
             ref_table, from_col, to_col = row[2], row[3], row[4]
             if ref_table == "BaseItems":
                 refs.append((t, from_col))
     return refs
+
 
 def restart_jellyfin_and_report():
     print("\nRestarting jellyfin service...")
@@ -61,7 +51,6 @@ def restart_jellyfin_and_report():
         print("ERROR: systemctl restart timed out after 30s")
         return
 
-    # give it a moment to come up before checking status
     time.sleep(3)
 
     status = subprocess.run(
@@ -73,9 +62,8 @@ def restart_jellyfin_and_report():
     if status.returncode != 0 and "could not be found" in status.stdout.lower():
         print("\nNOTE: service 'jellyfin' not found — check the exact unit name with 'systemctl list-units | grep -i jellyfin'")
 
+
 def report_image_gaps(cur, type_filter=None):
-    """Report, per BaseItems Type, how many rows have no matching BaseItemImageInfos row."""
-    # discover actual image-info table+column names dynamically (schema-safe)
     cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
     tables = {r[0] for r in cur.fetchall()}
     image_table = "BaseItemImageInfos" if "BaseItemImageInfos" in tables else None
@@ -91,7 +79,7 @@ def report_image_gaps(cur, type_filter=None):
             fk_col = from_col
             break
     if not fk_col:
-        fk_col = "ItemId"  # fallback
+        fk_col = "ItemId"
 
     where = ""
     params = ()
@@ -129,48 +117,302 @@ def report_image_gaps(cur, type_filter=None):
     print("-" * 82)
     print(f"{'TOTAL':<55} {grand_total:>7} {grand_with:>9} {grand_total - grand_with:>8}")
 
+
+def find_backups(db_path):
+    return sorted(glob.glob(f"{db_path}{BACKUP_SUFFIX}.*"), reverse=True)
+
+
+def backup_db(db_path):
+    timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+    backup_path = f"{db_path}{BACKUP_SUFFIX}.{timestamp}"
+    shutil.copy2(db_path, backup_path)
+    print(f"Backup created at: {backup_path}")
+    return backup_path
+
+
+def restore_db(db_path, backup_path):
+    if not os.path.exists(backup_path):
+        print(f"ERROR: backup not found at {backup_path}")
+        return False
+    shutil.copy2(backup_path, db_path)
+    print(f"Restored {db_path} from {backup_path}")
+    return True
+
+
+def prompt_choice(prompt, options):
+    while True:
+        try:
+            val = input(prompt).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            sys.exit(0)
+        if val in options:
+            return val
+        print(f"Invalid choice. Options: {', '.join(options)}")
+
+
+def prompt_yes_no(prompt, default=None):
+    suffix = {True: " [Y/n]", False: " [y/N]", None: " [y/n]"}[default]
+    while True:
+        try:
+            val = input(prompt + suffix).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            sys.exit(0)
+        if not val and default is not None:
+            return default
+        if val in ("y", "yes"):
+            return True
+        if val in ("n", "no"):
+            return False
+        print("Please answer 'y' or 'n'.")
+
+
+def interactive_mode(db_path):
+    print()
+    print("=" * 60)
+    print("  jellyfin-clean-orphans — Interactive Mode")
+    print("=" * 60)
+    print(f"  DB: {db_path}")
+    print()
+
+    backups = find_backups(db_path)
+
+    while True:
+        print()
+        print("Options:")
+        print("  1) Image gap report")
+        print("  2) Scan for orphans (dry-run)")
+        print("  3) Scan and clean orphans")
+        if backups:
+            print("  4) Restore database from backup")
+            print("  5) Exit")
+        else:
+            print("  4) Exit")
+        print()
+
+        n_options = "5" if backups else "4"
+        choice = prompt_choice("Choice [1-{}]: ".format(n_options), [str(i) for i in range(1, int(n_options) + 1)])
+
+        if choice == "1":
+            do_image_gap_report(db_path)
+        elif choice == "2":
+            do_scan(db_path, execute=False)
+        elif choice == "3":
+            do_scan(db_path, execute=True)
+        elif choice == "4":
+            if backups:
+                do_restore(db_path, backups)
+            else:
+                print("Goodbye.")
+                break
+        elif choice == "5":
+            print("Goodbye.")
+            break
+
+
+def do_image_gap_report(db_path):
+    type_filter = input("Filter by type (e.g. Movie, Episode) or press Enter for all: ").strip() or None
+    if not os.path.exists(db_path):
+        print(f"ERROR: db not found at {db_path}")
+        return
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    report_image_gaps(cur, type_filter=type_filter)
+    conn.close()
+
+
+def do_scan(db_path, execute):
+    print()
+    filter_choice = prompt_choice("Scope — (f)ilter by path substring, (a)ll items: ", ["f", "a"])
+    path_filter = None
+    if filter_choice == "f":
+        path_filter = input("Enter path substring to match: ").strip()
+        while not path_filter:
+            path_filter = input("Path substring cannot be empty: ").strip()
+
+    if not os.path.exists(db_path):
+        print(f"ERROR: db not found at {db_path}")
+        return
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    if path_filter:
+        cur.execute(
+            'SELECT Id, Path, Type FROM BaseItems WHERE Path LIKE ?',
+            (f"%{path_filter}%",)
+        )
+        scope_desc = f"rows matching '{path_filter}'"
+    else:
+        cur.execute('SELECT Id, Path, Type FROM BaseItems WHERE Path IS NOT NULL')
+        scope_desc = "entire library"
+
+    rows = cur.fetchall()
+
+    if not rows:
+        print(f"No BaseItems rows found for {scope_desc}. Nothing to do.")
+        conn.close()
+        return
+
+    print(f"Scanning {len(rows)} {scope_desc}...")
+    orphaned = []
+    checked = 0
+    for item_id, path, item_type in rows:
+        checked += 1
+        exists = os.path.exists(path) if path else True
+        if not exists:
+            print(f"  [MISSING] {item_type}: {path}")
+            orphaned.append(item_id)
+
+    print(f"\nChecked {checked} rows — found {len(orphaned)} orphaned (path missing on disk).")
+
+    if not orphaned:
+        print("Nothing orphaned.")
+        conn.close()
+        return
+
+    child_refs = find_child_fk_tables(cur)
+    if child_refs:
+        print("\nChild tables with foreign keys into BaseItems:")
+        for t, col in child_refs:
+            print(f"  {t}.{col}")
+    else:
+        print("\nNo child FK tables discovered (schema may rely on ON DELETE CASCADE already).")
+
+    if not execute:
+        print(f"\n{len(orphaned)} orphaned row(s) would be removed. (dry-run only — no changes made.)")
+        conn.close()
+        return
+
+    print(f"\n{len(orphaned)} orphaned row(s) will be removed.")
+    if not prompt_yes_no("Proceed with cleanup?", default=False):
+        print("Cancelled.")
+        conn.close()
+        return
+
+    backup_db(db_path)
+
+    def chunks(lst, n):
+        for i in range(0, len(lst), n):
+            yield lst[i:i + n]
+
+    for t, col in child_refs:
+        total = 0
+        try:
+            for chunk in chunks(orphaned, CHUNK):
+                placeholders = ",".join("?" * len(chunk))
+                cur.execute(f'DELETE FROM "{t}" WHERE "{col}" IN ({placeholders})', chunk)
+                total += cur.rowcount
+            print(f'Deleted {total} rows from "{t}"')
+        except sqlite3.OperationalError as e:
+            print(f'Skipped "{t}": {e}')
+
+    total = 0
+    for chunk in chunks(orphaned, CHUNK):
+        placeholders = ",".join("?" * len(chunk))
+        cur.execute(f'DELETE FROM BaseItems WHERE Id IN ({placeholders})', chunk)
+        total += cur.rowcount
+    print(f"Deleted {total} rows from BaseItems")
+
+    conn.commit()
+    conn.close()
+    print("\nDone.")
+
+    if prompt_yes_no("Restart Jellyfin service now?", default=True):
+        restart_jellyfin_and_report()
+
+
+def do_restore(db_path, backups):
+    print()
+    print("Available backups:")
+    for i, bp in enumerate(backups, 1):
+        ts = bp.rsplit(".", 1)[-1]
+        try:
+            dt = datetime.strptime(ts, "%Y%m%d%H%M%S")
+            label = dt.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            label = ts
+        size = os.path.getsize(bp)
+        print(f"  {i}) {label}  ({size / 1024 / 1024:.1f} MB)")
+
+    n_options = [str(i) for i in range(1, len(backups) + 1)] + ["c"]
+    choice = prompt_choice(f"Choose backup to restore [1-{len(backups)}] or (c)ancel: ", n_options)
+    if choice == "c":
+        print("Cancelled.")
+        return
+
+    bp = backups[int(choice) - 1]
+    print(f"\nWARNING: This will overwrite {db_path} with the selected backup.")
+    if not prompt_yes_no("Are you sure?", default=False):
+        print("Cancelled.")
+        return
+
+    restore_db(db_path, bp)
+
+    if prompt_yes_no("Restart Jellyfin service now?", default=True):
+        restart_jellyfin_and_report()
+
+
 def main():
-    parser = argparse.ArgumentParser()
-    DEFAULT_DB_PATH = "/var/lib/jellyfin/data/jellyfin.db"
+    parser = argparse.ArgumentParser(
+        description="Clean orphaned rows from Jellyfin's jellyfin.db. "
+                    "Run without arguments for interactive mode."
+    )
     parser.add_argument("--db", dest="db_path", default=DEFAULT_DB_PATH,
-                         help=f"Path to Jellyfin jellyfin.db (default: {DEFAULT_DB_PATH})")
+                        help=f"Path to Jellyfin jellyfin.db (default: {DEFAULT_DB_PATH})")
     parser.add_argument("--filter", dest="path_filter", default=None,
-                         help="Substring to match in the Path column, e.g. 'Dutton Ranch'. "
-                              "Omit (or pass --all) to scan the entire library for orphans. "
-                              "With --image-gap-report, matches against Type instead, e.g. 'Movie'.")
+                        help="Substring to match in the Path column, e.g. 'Dutton Ranch'. "
+                             "Omit (or pass --all) to scan the entire library for orphans. "
+                             "With --image-gap-report, matches against Type instead, e.g. 'Movie'.")
     parser.add_argument("--all", action="store_true", help="Scan all BaseItems rows regardless of path filter")
     parser.add_argument("--execute", action="store_true", help="Actually delete rows (default is dry-run)")
     parser.add_argument("--dry-run", action="store_true", help="Just show what would be deleted (default)")
     parser.add_argument("--restart-jellyfin", action="store_true",
-                         help="After a successful --execute, run 'systemctl restart jellyfin' and report status")
+                        help="After a successful --execute, run 'systemctl restart jellyfin' and report status")
     parser.add_argument("--image-gap-report", action="store_true",
-                         help="Read-only: report how many BaseItems (by type) are missing an image record. "
-                              "Optionally combine with --filter to scope by Type substring, e.g. 'Movie'.")
+                        help="Read-only: report how many BaseItems (by type) are missing an image record. "
+                             "Optionally combine with --filter to scope by Type substring, e.g. 'Movie'.")
+    parser.add_argument("--restore", action="store_true",
+                        help="Restore the database from the most recent jellycleanbak backup")
     args = parser.parse_args()
 
-    if args.image_gap_report:
-        if not os.path.exists(args.db_path):
-            print(f"ERROR: db not found at {args.db_path}")
+    if not os.path.exists(args.db_path):
+        print(f"ERROR: db not found at {args.db_path}")
+        sys.exit(1)
+
+    if args.restore:
+        backups = find_backups(args.db_path)
+        if not backups:
+            print("ERROR: no jellycleanbak backups found.")
             sys.exit(1)
+        bp = backups[0]
+        print(f"Restoring from {bp}...")
+        restore_db(args.db_path, bp)
+        return
+
+    if args.image_gap_report:
         conn = sqlite3.connect(args.db_path)
         cur = conn.cursor()
         report_image_gaps(cur, type_filter=args.path_filter)
         conn.close()
         return
 
-    if not args.path_filter and not args.all:
-        args.all = True  # default to full scan if nothing specified
+    has_action = any([
+        args.path_filter, args.all, args.execute, args.dry_run,
+        args.restart_jellyfin
+    ])
+    if not has_action:
+        interactive_mode(args.db_path)
+        return
 
-    if not os.path.exists(args.db_path):
-        print(f"ERROR: db not found at {args.db_path}")
-        sys.exit(1)
+    if not args.path_filter and not args.all:
+        args.all = True
 
     execute = args.execute and not args.dry_run
 
     if execute:
-        backup_path = f"{args.db_path}.bak.{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        shutil.copy2(args.db_path, backup_path)
-        print(f"Backup created at: {backup_path}")
+        backup_db(args.db_path)
 
     conn = sqlite3.connect(args.db_path)
     cur = conn.cursor()
@@ -196,7 +438,7 @@ def main():
     checked = 0
     for item_id, path, item_type in rows:
         checked += 1
-        exists = os.path.exists(path) if path else True  # skip virtual items with no path
+        exists = os.path.exists(path) if path else True
         if not exists:
             print(f"  [MISSING] {item_type}: {path}")
             orphaned.append(item_id)
@@ -210,7 +452,6 @@ def main():
 
     print(f"\n{len(orphaned)} orphaned row(s) will be removed.")
 
-    # Discover child tables referencing BaseItems.Id, so we clean those up too
     child_refs = find_child_fk_tables(cur)
     if child_refs:
         print("\nChild tables with foreign keys into BaseItems:")
@@ -223,8 +464,6 @@ def main():
         print("\nDry run only — no changes made. Re-run with --execute to actually delete.")
         conn.close()
         return
-
-    CHUNK = 500  # stay well under SQLite's variable limit
 
     def chunks(lst, n):
         for i in range(0, len(lst), n):
@@ -256,6 +495,7 @@ def main():
         restart_jellyfin_and_report()
     else:
         print("Restart Jellyfin and trigger a library scan.")
+
 
 if __name__ == "__main__":
     main()
