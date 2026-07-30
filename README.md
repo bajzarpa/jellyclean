@@ -14,14 +14,14 @@ records (`BaseItemImageInfos`) by item type, useful after a bulk
 No `git` required — this pulls the script straight from GitHub:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bajzarpa/jellyclean/main/install.sh | sudo sh
+curl -fsSL https://raw.githubusercontent.com/bajzarpa/jellyclean/v1.0.0/install.sh | sudo sh
 ```
 
 This downloads `bin/jellyfin-clean-orphans` and installs it to
 `/usr/local/bin/jellyfin-clean-orphans`, so it's available as a global
 command: `jellyfin-clean-orphans`.
 
-To update later (or reinstall), just re-run the same command.
+To update to a newer release, replace `v1.0.0` with the latest tag in the URL and re-run.
 
 Requires `python3` (stdlib only — no extra pip packages needed) and either
 `curl` or `wget` on the target machine.
@@ -31,12 +31,12 @@ Requires `python3` (stdlib only — no extra pip packages needed) and either
 If you'd rather have a local copy (e.g. to browse or edit the source):
 
 ```bash
-git clone https://github.com/bajzarpa/jellyclean.git
+git clone --branch v1.0.0 https://github.com/bajzarpa/jellyclean.git
 cd jellyclean
 sudo ./install.sh
 ```
 
-`install.sh` always fetches the latest `bin/jellyfin-clean-orphans` from
+`install.sh` fetches `bin/jellyfin-clean-orphans` from the pinned tag on
 GitHub and installs it to `/usr/local/bin` — same behavior whether you run
 it locally or pipe it straight from curl. It doesn't use your local clone's
 copy of the script, so a local clone is purely for reference/editing, not

@@ -6,10 +6,10 @@ set -eu
 # No git required on the target machine.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/bajzarpa/jellyclean/main/install.sh | sudo sh
+#   curl -fsSL https://raw.githubusercontent.com/bajzarpa/jellyclean/v1.0.0/install.sh | sudo sh
 
 REPO="bajzarpa/jellyclean"
-BRANCH="main"
+BRANCH="v1.0.0"
 RAW_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/bin/jellyfin-clean-orphans"
 DEST="/usr/local/bin/jellyfin-clean-orphans"
 
